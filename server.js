@@ -12,11 +12,10 @@ app.use(cors());
 const upload = multer({ dest: "uploads/" });
 
 // ===== CONFIG =====
-const KEYFILE = "./service-account.json";
 const BUCKET_NAME = "brit-qr-uploads-482609";
 // ==================
 
-const storage = new Storage({ keyFilename: KEYFILE });
+const storage = new Storage();
 const bucket = storage.bucket(BUCKET_NAME);
 
 app.get("/", (req, res) => {
