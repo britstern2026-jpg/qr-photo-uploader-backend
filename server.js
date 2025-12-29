@@ -47,19 +47,12 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
     // Delete temp file
     fs.unlinkSync(file.path);
 
-    // Create a signed URL (valid for 7 days)
-    const [signedUrl] = await bucket.file(finalName).getSignedUrl({
-      version: "v4",
-      action: "read",
-      expires: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
-    });
-
     res.json({
       ok: true,
       bucket: BUCKET_NAME,
       objectName: finalName,
-      signedUrl,
     });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
