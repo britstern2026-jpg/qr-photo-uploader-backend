@@ -6,126 +6,91 @@ import { Storage } from "@google-cloud/storage";
 const app = express();
 app.use(cors());
 
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ dest: "uploads/" });
 
-const BUCKET_NAME = process.env.BUCKET_NAME || "brit-qr-uploads-482609";
+// ✅ Your bucket name
+const BUCKET_NAME = "brit-qr-uploads-482609";
 
-// ✅ Cloud Run uses its attached service account automatically
+// ✅ Cloud Run automatically provides credentials if service account attached
 const storage = new Storage();
 const bucket = storage.bucket(BUCKET_NAME);
 
+// ==========================
+// ✅ Health check
+// ==========================
 app.get("/", (req, res) => {
   res.send("✅ Backend is running. Use POST /upload to upload photos.");
 });
 
-/**
- * ✅ Upload endpoint
- * Always uploads the file.
- * If visibility === "public", it will make the uploaded object publicly readable.
- */
+// ==========================
+// ✅ Upload endpoint
+// ==========================
 app.post("/upload", upload.single("photo"), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: "Missing file: photo" });
-    }
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-    const name = (req.body.name || "").trim();
-    const visibility = (req.body.visibility || "private").trim(); // public | private
+    const name = (req.body.name || "photo").trim() || "photo";
+    const ext = req.file.originalname.split(".").pop() || "jpg";
+    const filename = `${name}_${new Date().toISOString().replace(/[:.]/g, "-")}.${ext}`;
 
-    const safeBase = name ? name.replace(/[^\w\-]+/g, "_") : "photo";
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const ext = req.file.originalname?.split(".").pop() || "jpg";
-    const objectName = `${safeBase}_${timestamp}.${ext}`;
-
-    const file = bucket.file(objectName);
-
-    const stream = file.createWriteStream({
-      resumable: false,
-      contentType: req.file.mimetype,
+    await bucket.upload(req.file.path, {
+      destination: filename,
       metadata: {
-        metadata: {
-          visibility, // ✅ stored as custom metadata
-        },
-      },
-    });
-
-    stream.on("error", (err) => {
-      console.error(err);
-      res.status(500).json({ error: err.message });
-    });
-
-    stream.on("finish", async () => {
-      try {
-        // ✅ If public, make it readable by anyone (for gallery)
-        if (visibility === "public") {
-          await file.makePublic();
-        }
-
-        return res.json({
-          ok: true,
-          bucket: BUCKET_NAME,
-          objectName,
-          visibility,
-        });
-      } catch (err) {
-        console.error("Finish error:", err);
-        return res.status(500).json({ error: err.message });
+        contentType: req.file.mimetype
       }
     });
 
-    stream.end(req.file.buffer);
+    res.json({
+      ok: true,
+      bucket: BUCKET_NAME,
+      objectName: filename
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-/**
- * ✅ Gallery endpoint
- * Returns ONLY files marked visibility=public.
- * Uses public URLs (no signed URLs).
- */
+// ==========================
+// ✅ Gallery endpoint (SIGNED URLS)
+// ==========================
 app.get("/photos", async (req, res) => {
   try {
-    const [files] = await bucket.getFiles({ autoPaginate: true });
-
-    const results = [];
-
-    for (const f of files) {
-      try {
-        const [meta] = await f.getMetadata();
-        const visibility = meta?.metadata?.visibility || "private";
-
-        if (visibility !== "public") continue;
-
-        results.push({
-          name: f.name,
-          url: `https://storage.googleapis.com/${BUCKET_NAME}/${encodeURIComponent(
-            f.name
-          )}`,
-          updated: meta.updated || null,
-          size: meta.size || null,
-          contentType: meta.contentType || null,
-        });
-      } catch (e) {
-        // skip bad files
-        continue;
-      }
-    }
-
-    // ✅ newest first (if updated exists)
-    results.sort((a, b) => {
-      const da = a.updated ? new Date(a.updated).getTime() : 0;
-      const db = b.updated ? new Date(b.updated).getTime() : 0;
-      return db - da;
+    const [files] = await bucket.getFiles({
+      // optional: prefix: "everyone/" etc if you ever add folders
     });
 
-    res.json({ ok: true, photos: results });
+    // newest first
+    files.sort((a, b) => (b.metadata.updated || "").localeCompare(a.metadata.updated || ""));
+
+    const photos = await Promise.all(
+      files.map(async (file) => {
+        // Create signed URL valid for 7 days
+        const [signedUrl] = await file.getSignedUrl({
+          version: "v4",
+          action: "read",
+          expires: Date.now() + 7 * 24 * 60 * 60 * 1000
+        });
+
+        return {
+          name: file.name,
+          signedUrl,
+          updated: file.metadata.updated,
+          size: file.metadata.size,
+          contentType: file.metadata.contentType
+        };
+      })
+    );
+
+    res.json({ ok: true, photos });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
+// ==========================
+// ✅ Start server
+// ==========================
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
