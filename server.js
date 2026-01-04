@@ -30,20 +30,32 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
     const name = (req.body.name || "photo").trim() || "photo";
+
+    // ✅ NEW: read visibility sent from frontend
+    // publicCheckbox checked -> "public"
+    // unchecked -> "private"
+    const visibility = (req.body.visibility || "private").trim(); // "public" | "private"
+
     const ext = req.file.originalname.split(".").pop() || "jpg";
     const filename = `${name}_${new Date().toISOString().replace(/[:.]/g, "-")}.${ext}`;
 
     await bucket.upload(req.file.path, {
       destination: filename,
       metadata: {
-        contentType: req.file.mimetype
+        contentType: req.file.mimetype,
+
+        // ✅ NEW: custom object metadata we can filter by later
+        metadata: {
+          visibility: visibility
+        }
       }
     });
 
     res.json({
       ok: true,
       bucket: BUCKET_NAME,
-      objectName: filename
+      objectName: filename,
+      visibility
     });
   } catch (err) {
     console.error(err);
@@ -53,18 +65,23 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
 
 // ==========================
 // ✅ Gallery endpoint (SIGNED URLS)
+// ✅ ONLY returns photos with visibility=public
 // ==========================
 app.get("/photos", async (req, res) => {
   try {
-    const [files] = await bucket.getFiles({
-      // optional: prefix: "everyone/" etc if you ever add folders
-    });
+    const [files] = await bucket.getFiles({});
 
     // newest first
     files.sort((a, b) => (b.metadata.updated || "").localeCompare(a.metadata.updated || ""));
 
+    // ✅ Filter to ONLY public images
+    const publicFiles = files.filter((file) => {
+      const v = file.metadata?.metadata?.visibility || "private";
+      return v === "public";
+    });
+
     const photos = await Promise.all(
-      files.map(async (file) => {
+      publicFiles.map(async (file) => {
         // Create signed URL valid for 7 days
         const [signedUrl] = await file.getSignedUrl({
           version: "v4",
@@ -75,6 +92,7 @@ app.get("/photos", async (req, res) => {
         return {
           name: file.name,
           signedUrl,
+          visibility: file.metadata?.metadata?.visibility || "private",
           updated: file.metadata.updated,
           size: file.metadata.size,
           contentType: file.metadata.contentType
