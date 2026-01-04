@@ -85,8 +85,11 @@ app.get("/photos", async (req, res) => {
       return v === "public";
     });
 
+    // ✅ NEW: if admin -> return all, else only public
+    const visibleFiles = isAdmin ? files : publicFiles;
+
     const photos = await Promise.all(
-      publicFiles.map(async (file) => {
+      visibleFiles.map(async (file) => {
         // Create signed URL valid for 7 days
         const [signedUrl] = await file.getSignedUrl({
           version: "v4",
