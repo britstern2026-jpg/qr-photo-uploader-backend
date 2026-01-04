@@ -3,6 +3,8 @@ import multer from "multer";
 import cors from "cors";
 import { Storage } from "@google-cloud/storage";
 
+const ADMIN_PASSWORD = "1234";
+
 const app = express();
 app.use(cors());
 
@@ -69,6 +71,9 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
 // ==========================
 app.get("/photos", async (req, res) => {
   try {
+    const requestPassword = (req.header("x-gallery-password") || "").trim();
+    const isAdmin = requestPassword === ADMIN_PASSWORD;
+
     const [files] = await bucket.getFiles({});
 
     // newest first
@@ -100,7 +105,7 @@ app.get("/photos", async (req, res) => {
       })
     );
 
-    res.json({ ok: true, photos });
+    res.json({ ok: true, admin: isAdmin, photos });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
