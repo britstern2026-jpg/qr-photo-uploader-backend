@@ -3,94 +3,87 @@ import multer from "multer";
 import cors from "cors";
 import { Storage } from "@google-cloud/storage";
 import sharp from "sharp";
+import fs from "fs";
+
+const ADMIN_PASSWORD = "1234";
 
 const app = express();
 app.use(cors());
 
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ dest: "uploads/" });
 
-const BUCKET_NAME = process.env.BUCKET_NAME || "brit-qr-uploads-482609";
+// ✅ Your bucket name
+const BUCKET_NAME = "brit-qr-uploads-482609";
+
 const storage = new Storage();
 const bucket = storage.bucket(BUCKET_NAME);
 
+// ==========================
+// ✅ Health check
+// ==========================
 app.get("/", (req, res) => {
   res.send("✅ Backend is running. Use POST /upload to upload photos.");
 });
 
-function safeBaseName(name) {
-  const n = (name || "").trim();
-  return n ? n.replace(/[^\w\-]+/g, "_") : "photo";
-}
-
-function getExtFromMime(mime) {
-  if (!mime) return "jpg";
-  if (mime.includes("png")) return "png";
-  if (mime.includes("webp")) return "webp";
-  return "jpg";
-}
-
-async function uploadBufferToGCS({ objectName, buffer, contentType, visibility }) {
-  const file = bucket.file(objectName);
-  await file.save(buffer, {
-    resumable: false,
-    metadata: {
-      contentType,
-      metadata: {
-        visibility: visibility || "private",
-      },
-    },
-  });
-}
-
+// ==========================
+// ✅ Upload endpoint (ORIGINAL + THUMB)
+// ==========================
 app.post("/upload", upload.single("photo"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "Missing file: photo" });
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-    const name = (req.body.name || "").trim();
-    const visibility = (req.body.visibility || "private").trim(); // "public" | "private"
+    const name = (req.body.name || "photo").trim() || "photo";
+    const visibility = (req.body.visibility || "private").trim();
 
-    const safeBase = safeBaseName(name);
+    const ext = req.file.originalname.split(".").pop() || "jpg";
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 
-    // Store original under a stable name
-    const origExt = req.file.originalname?.split(".").pop() || getExtFromMime(req.file.mimetype);
-    const objectName = `${safeBase}_${timestamp}.${origExt}`;
+    const originalName = `${name}_${timestamp}.${ext}`;
+    const thumbName = `thumbs/${name}_${timestamp}.jpg`;
 
-    // Thumbnail object name
-    const thumbObjectName = `thumbs/${safeBase}_${timestamp}.jpg`;
+    // ✅ Create thumbnail locally
+    const thumbPath = `${req.file.path}_thumb.jpg`;
 
-    // 1) Upload original (unchanged)
-    await uploadBufferToGCS({
-      objectName,
-      buffer: req.file.buffer,
-      contentType: req.file.mimetype,
-      visibility,
-    });
-
-    // 2) Create thumbnail (auto-rotate by EXIF + shrink)
-    //    rotate() with no args = respect EXIF orientation and bake it into pixels
-    const thumbBuffer = await sharp(req.file.buffer)
+    await sharp(req.file.path)
       .rotate()
-      .resize({
-        width: 420,          // good for grid, fast
-        withoutEnlargement: true,
-      })
-      .jpeg({ quality: 72, mozjpeg: true })
-      .toBuffer();
+      .resize({ width: 600 })   // ✅ thumbnail width (fast enough + good quality)
+      .jpeg({ quality: 70 })    // ✅ smaller file
+      .toFile(thumbPath);
 
-    await uploadBufferToGCS({
-      objectName: thumbObjectName,
-      buffer: thumbBuffer,
-      contentType: "image/jpeg",
-      visibility, // keep same visibility as original
+    // ✅ Upload original
+    await bucket.upload(req.file.path, {
+      destination: originalName,
+      metadata: {
+        contentType: req.file.mimetype,
+        metadata: {
+          visibility,
+          thumb: thumbName
+        }
+      }
     });
+
+    // ✅ Upload thumbnail
+    await bucket.upload(thumbPath, {
+      destination: thumbName,
+      metadata: {
+        contentType: "image/jpeg",
+        metadata: {
+          visibility,
+          isThumb: "true"
+        }
+      }
+    });
+
+    // cleanup temp files
+    fs.unlink(req.file.path, () => {});
+    fs.unlink(thumbPath, () => {});
 
     res.json({
       ok: true,
       bucket: BUCKET_NAME,
-      objectName,
-      thumbObjectName,
-      visibility,
+      objectName: originalName,
+      thumbObject: thumbName,
+      visibility
     });
   } catch (err) {
     console.error(err);
@@ -98,68 +91,71 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
   }
 });
 
+// ==========================
+// ✅ Photos endpoint (returns thumb + full)
+// ==========================
 app.get("/photos", async (req, res) => {
   try {
+    const requestPassword = (req.header("x-gallery-password") || "").trim();
+    const isAdmin = requestPassword === ADMIN_PASSWORD;
+
     const [files] = await bucket.getFiles({});
 
-    // Only originals (exclude thumbs/)
-    const originals = files.filter((f) => !f.name.startsWith("thumbs/"));
-
     // newest first
-    originals.sort((a, b) => (b.metadata.updated || "").localeCompare(a.metadata.updated || ""));
+    files.sort((a, b) => (b.metadata.updated || "").localeCompare(a.metadata.updated || ""));
 
-    // ONLY public images (your current behavior)
-    const publicOriginals = originals.filter((file) => {
+    // ✅ remove thumbnails from list (we link them via metadata)
+    const originals = files.filter(f => !f.name.startsWith("thumbs/"));
+
+    const publicFiles = originals.filter((file) => {
       const v = file.metadata?.metadata?.visibility || "private";
       return v === "public";
     });
 
+    const visibleFiles = isAdmin ? originals : publicFiles;
+
     const photos = await Promise.all(
-      publicOriginals.map(async (file) => {
-        const base = file.name.replace(/\.[^.]+$/, ""); // remove extension
-        const thumbName = `thumbs/${base}.jpg`;
-        const thumbFile = bucket.file(thumbName);
+      visibleFiles.map(async (file) => {
+        const thumbPath = file.metadata?.metadata?.thumb;
 
         const [signedUrl] = await file.getSignedUrl({
           version: "v4",
           action: "read",
-          expires: Date.now() + 7 * 24 * 60 * 60 * 1000,
+          expires: Date.now() + 7 * 24 * 60 * 60 * 1000
         });
 
-        // thumb might not exist for older uploads -> fallback to full
-        let thumbSignedUrl = signedUrl;
-        try {
-          const [exists] = await thumbFile.exists();
-          if (exists) {
-            const [turl] = await thumbFile.getSignedUrl({
-              version: "v4",
-              action: "read",
-              expires: Date.now() + 7 * 24 * 60 * 60 * 1000,
-            });
-            thumbSignedUrl = turl;
-          }
-        } catch (_) {
-          // ignore, fallback to full
+        let signedThumbUrl = signedUrl; // fallback = full image
+        if (thumbPath) {
+          const thumbFile = bucket.file(thumbPath);
+          const [thumbSigned] = await thumbFile.getSignedUrl({
+            version: "v4",
+            action: "read",
+            expires: Date.now() + 7 * 24 * 60 * 60 * 1000
+          });
+          signedThumbUrl = thumbSigned;
         }
 
         return {
           name: file.name,
-          signedUrl,         // full image
-          thumbSignedUrl,    // thumbnail image
+          signedUrl,
+          signedThumbUrl,
           visibility: file.metadata?.metadata?.visibility || "private",
           updated: file.metadata.updated,
           size: file.metadata.size,
-          contentType: file.metadata.contentType,
+          contentType: file.metadata.contentType
         };
       })
     );
 
-    res.json({ ok: true, photos });
+    res.json({ ok: true, admin: isAdmin, photos });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
+// ==========================
+// ✅ Start server
+// ==========================
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
