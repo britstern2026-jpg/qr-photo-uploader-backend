@@ -44,10 +44,13 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
     // ✅ Create thumbnail locally
     const thumbPath = `${req.file.path}_thumb.jpg`;
 
+    // ✅ IMPORTANT FIX:
+    // Bake rotation + force orientation=1 so thumbs never appear sideways in any browser
     await sharp(req.file.path)
       .rotate()
-      .resize({ width: 600 })   // ✅ thumbnail width (fast enough + good quality)
-      .jpeg({ quality: 70 })    // ✅ smaller file
+      .withMetadata({ orientation: 1 })
+      .resize({ width: 600 })
+      .jpeg({ quality: 70 })
       .toFile(thumbPath);
 
     // ✅ Upload original
