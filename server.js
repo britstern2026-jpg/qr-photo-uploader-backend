@@ -45,6 +45,7 @@ app.post("/upload", upload.single("photo"), async (req, res) => {
     const thumbPath = `${req.file.path}_thumb.jpg`;
 
     await sharp(req.file.path)
+      .rotate()
       .resize({ width: 600 })   // ✅ thumbnail width (fast enough + good quality)
       .jpeg({ quality: 70 })    // ✅ smaller file
       .toFile(thumbPath);
